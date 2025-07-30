@@ -1,10 +1,20 @@
-streamlit
-pandas
-nltk
-gensim
-scikit-learn
-networkx
-numpy
-beautifulsoup4  # Untuk pra-pemrosesan abstractive
-transformers    # Untuk model IndoBART
-torch           # Untuk backend PyTorch Transformers
+
+
+
+
+
+
+  # Untuk pra-pemrosesan abstractive
+    # Untuk model IndoBART
+           # Untuk backend PyTorch Transformers
+
+streamlit==1.25.0
+nltk==3.8.1
+gensim==4.3.2
+transformers==4.33.2
+torch==2.0.1
+pandas==1.5.3
+scikit-learn==1.2.2
+networkx==2.8.8
+numpy==1.23.5
+beautifulsoup4==4.12.2
