@@ -1,0 +1,2 @@
+abstractive_model_artifacts/* filter=lfs diff=lfs merge=lfs -text
+word2vec_model.bin filter=lfs diff=lfs merge=lfs -text

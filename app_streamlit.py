@@ -12,8 +12,16 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from bs4 import BeautifulSoup
-import requests # Ditambahkan untuk mengambil konten dari URL
-from urllib.parse import urlparse # Ditambahkan untuk validasi URL
+import requests
+from urllib.parse import urlparse
+import time
+
+# --- Tampilan Aplikasi Streamlit ---
+st.set_page_config(
+    page_title="Text Summarizer (Extractive & Abstractive)",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
 print("--- Memulai Aplikasi Streamlit ---")
 
@@ -51,12 +59,11 @@ def get_text_from_url(url):
         article_text = ""
         
         # Opsi 1: Coba cari tag semantik atau class/id umum yang mengandung konten artikel
-        # Ini lebih robust untuk berbagai situs web berita/blog
         possible_content_tags = [
             {'name': 'article'},
             {'name': 'main'},
-            {'name': 'div', 'class_': re.compile(r'article|content|post|story|body', re.IGNORECASE)},
-            {'name': 'section', 'class_': re.compile(r'article|content|post|story|body', re.IGNORECASE)},
+            {'name': 'div', 'class_': re.compile(r'article|content|post|story|body|entry-content', re.IGNORECASE)},
+            {'name': 'section', 'class_': re.compile(r'article|content|post|story|body|entry-content', re.IGNORECASE)},
         ]
 
         for selector in possible_content_tags:
@@ -86,16 +93,16 @@ def get_text_from_url(url):
                 return None
 
         # Lakukan pembersihan tambahan pada teks yang diambil
-        # Hapus karakter non-ASCII yang tidak diinginkan
-        article_text = re.sub(r'[^\x00-\x7F]+', ' ', article_text)
         # Ganti spasi berlebih, tab, dan newline dengan satu spasi
         article_text = re.sub(r'\s+', ' ', article_text).strip()
+        # Hapus karakter non-ASCII yang tidak diinginkan (opsional, tergantung kebutuhan)
+        # article_text = re.sub(r'[^\x00-\x7F]+', ' ', article_text) 
         
         # Filter kalimat yang terlalu pendek atau berisi boilerplate
         sentences = sent_tokenize(article_text)
         filtered_sentences = [
             s for s in sentences 
-            if len(s.split()) > 5 and not re.search(r'^\s*(gambar|foto|video|iklan|advertisement|copyright|terkait|baca juga|ikuti kami)\s*[:.]?\s*$', s, re.IGNORECASE)
+            if len(s.split()) > 5 and not re.search(r'^\s*(gambar|foto|video|iklan|advertisement|copyright|terkait|baca juga|ikuti kami|subscribe|newsletter|komentar|bagikan)\s*[:.]?\s*$', s, re.IGNORECASE)
         ]
         article_text = " ".join(filtered_sentences)
 
@@ -143,7 +150,8 @@ def preprocess_single_article_extractive(article_content):
 def get_sentence_vector(sentence_tokens, word2vec_model):
     if word2vec_model is None:
         # Mengembalikan array nol jika model tidak dimuat, sesuaikan dimensi jika perlu
-        return np.zeros(100) # Asumsi ukuran vektor 100 jika tidak diketahui
+        # Asumsi ukuran vektor 100, bisa disesuaikan jika model Word2Vec Anda berbeda
+        return np.zeros(100) 
     
     vectors = []
     for word in sentence_tokens:
@@ -174,7 +182,8 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
 
     for i, tokens in enumerate(cleaned_sentences_tokenized):
         vec = get_sentence_vector(tokens, word2vec_model)
-        if vec is not None and not np.all(vec == 0): # Pastikan vektor tidak nol
+        # Pastikan vektor tidak nol dan memiliki dimensi yang benar
+        if vec is not None and not np.all(vec == 0) and vec.shape[0] == word2vec_model.vector_size: 
             sentence_vectors.append(vec)
             valid_original_indices.append(i) # Indeks di dalam original_relevant_sentences
 
@@ -185,7 +194,6 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
         # Menghitung matriks kemiripan kosinus antar vektor kalimat
         similarity_matrix = cosine_similarity(sentence_vectors)
     except ValueError as e:
-        # Tangani jika ada masalah dimensi vektor (jarang terjadi jika get_sentence_vector benar)
         return fallback_summary, f"Gagal (Masalah Dimensi Vektor: {e})"
 
     # Membuat graph dari matriks kemiripan dan menjalankan PageRank
@@ -199,7 +207,6 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
         return fallback_summary, "Gagal (PageRank Konvergensi)"
 
     # Urutkan kalimat berdasarkan skor PageRank dari yang tertinggi
-    # ranked_processed_indices: (skor, indeks_dalam_list_sentence_vectors)
     ranked_processed_indices = sorted(((scores[i], idx_in_valid) for idx_in_valid, i in enumerate(scores)), reverse=True)
 
     current_word_count = 0
@@ -226,7 +233,8 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
             pass
 
         # Hentikan jika sudah mencapai target kata atau cukup banyak kalimat
-        if current_word_count >= target_word_count or num_selected_sentences >= len(original_relevant_sentences) * 0.5 + 1:
+        # Pilih sekitar 20-50% dari kalimat asli untuk ringkasan
+        if current_word_count >= target_word_count or num_selected_sentences >= len(original_relevant_sentences) * 0.3 + 1:
             break
             
     # Jika tidak ada kalimat yang terpilih, gunakan fallback
@@ -240,10 +248,8 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
 
 # --- Fungsi Pra-pemrosesan untuk Abstractive ---
 def preprocess_abstractive(text):
-    # Menggunakan BeautifulSoup untuk membersihkan tag HTML yang mungkin ada (dari URL)
     text = BeautifulSoup(text, "html.parser").get_text()
     text = text.lower()
-    # Ganti spasi berlebih dengan satu spasi
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -251,30 +257,26 @@ def preprocess_abstractive(text):
 def indobart_summarize(text, tokenizer, model, min_len=30, max_len=150):
     clean_text = preprocess_abstractive(text)
 
-    # Tokenizer akan secara otomatis memotong input jika terlalu panjang (max_length=512)
-    # Namun, memberikan peringatan kepada pengguna bisa membantu
-    if len(clean_text.split()) > 512: # Estimasi kasar sebelum tokenisasi
-        st.warning("Peringatan: Teks input sangat panjang. Model abstractive mungkin hanya memproses bagian awalnya.")
+    if len(clean_text.split()) > 512: 
+        st.warning("Peringatan: Teks input sangat panjang. Model abstractive mungkin hanya memproses 512 token awal. Untuk hasil terbaik, coba gunakan teks yang lebih ringkas.")
 
-    with torch.no_grad(): # Nonaktifkan perhitungan gradien untuk inferensi
-        # Encode input teks
+    with torch.no_grad(): 
         input_ids = tokenizer.encode(clean_text, return_tensors='pt', max_length=512, truncation=True)
         
-        # Hasilkan ringkasan
         summary_ids = model.generate(
             input_ids,
             min_length=min_len,
             max_length=max_len,
-            num_beams=2,              # Meningkatkan kualitas ringkasan
-            repetition_penalty=2.0,   # Mengurangi pengulangan kata/frasa
-            length_penalty=0.8,       # Mendorong ringkasan yang lebih pendek dari max_len
-            early_stopping=True,      # Menghentikan generasi lebih awal jika EOS token ditemukan
-            no_repeat_ngram_size=2,   # Mencegah pengulangan n-gram berukuran 2
-            use_cache=True,           # Mempercepat inferensi
-            do_sample=True,           # Mengaktifkan sampling untuk variasi
-            temperature=0.7,          # Mengontrol keacakan output
-            top_k=50,                 # Memilih dari 50 token teratas
-            top_p=0.95                # Sampling dari distribusi kumulatif 95%
+            num_beams=4,              # Meningkatkan num_beams untuk kualitas yang lebih baik
+            repetition_penalty=2.0,   
+            length_penalty=1.0,       # Sesuaikan length_penalty
+            early_stopping=True,      
+            no_repeat_ngram_size=3,   # Mencegah pengulangan n-gram berukuran 3
+            use_cache=True,           
+            do_sample=True,           
+            temperature=0.8,          # Sesuaikan temperature untuk sedikit variasi tapi tetap koheren
+            top_k=50,                 
+            top_p=0.95                
         )
         summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
     return summary, "Sukses"
@@ -288,35 +290,53 @@ def load_word2vec_model(path=W2V_MODEL_PATH):
         if os.path.exists(path):
             try:
                 model = Word2Vec.load(path)
-                st.success("Model Word2Vec berhasil dimuat!")
+                # --- MODIFIKASI DIMULAI DI SINI ---
+                # Buat placeholder untuk pesan
+                success_message_placeholder = st.empty()
+                success_message_placeholder.success("Model Word2Vec berhasil dimuat!")
+                time.sleep(3) # Tunggu 3 detik
+                success_message_placeholder.empty() # Hapus pesan
                 return model
             except Exception as e:
                 st.error(f"Gagal memuat model Word2Vec: {e}. Pastikan file '{path}' ada dan tidak rusak.")
-                st.info("Anda mungkin perlu melatih dan menyimpan model Word2Vec terlebih dahulu.")
+                st.info("Anda mungkin perlu melatih dan menyimpan model Word2Vec terlebih dahulu dari korpus teks bahasa Indonesia.")
                 return None
         else:
             st.error(f"File model Word2Vec '{path}' tidak ditemukan.")
-            st.info("Harap pastikan Anda telah menempatkan file ini di folder yang benar.")
+            st.info("Harap pastikan Anda telah menempatkan file ini di folder yang sama dengan aplikasi Streamlit Anda. Jika belum punya, Anda perlu melatihnya atau mengunduh model pra-terlatih.")
             return None
 
 # IndoBART untuk Abstractive
 @st.cache_resource
 def load_indobart_model(path=ABSTRACTIVE_MODEL_PATH):
     with st.spinner("Memuat model IndoBART (Abstractive)..."):
-        if os.path.exists(path) and os.path.isdir(path):
+        if os.path.exists(path) and os.path.isdir(path) and os.path.exists(os.path.join(path, "config.json")): # Cek file config sebagai indikator kelengkapan
             try:
                 tokenizer = AutoTokenizer.from_pretrained(path)
                 model = AutoModelForSeq2SeqLM.from_pretrained(path)
                 model.eval() # Set model ke mode evaluasi
-                st.success("Model IndoBART berhasil dimuat!")
+                # --- MODIFIKASI DIMULAI DI SINI ---
+                # Buat placeholder untuk pesan
+                success_message_placeholder = st.empty()
+                success_message_placeholder.success("Model IndoBART berhasil dimuat!")
+                time.sleep(3) # Tunggu 3 detik
+                success_message_placeholder.empty() # Hapus pesan
                 return tokenizer, model
             except Exception as e:
-                st.error(f"Gagal memuat model IndoBART: {e}. Pastikan artefak model ada di '{path}'.")
+                st.error(f"Gagal memuat model IndoBART: {e}. Pastikan artefak model ada di '{path}' dan tidak rusak.")
                 st.info("Anda perlu mengunduh dan menyimpan model IndoBART ke folder ini terlebih dahulu.")
                 return None, None
         else:
             st.error(f"Folder model IndoBART '{path}' tidak ditemukan atau tidak lengkap.")
-            st.info("Harap pastikan Anda telah mengunduh dan menyimpan model IndoBART ke folder ini.")
+            st.info("Harap pastikan Anda telah mengunduh model **Wikidepia/indobart-base-IDN** dari Hugging Face dan menyimpan isinya ke dalam folder `abstractive_model_artifacts` di direktori yang sama dengan aplikasi ini.")
+            st.markdown("Untuk mengunduh, Anda bisa menggunakan kode berikut di lingkungan Python Anda:")
+            st.code("""
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+tokenizer = AutoTokenizer.from_pretrained("Wikidepia/indobart-base-IDN")
+model = AutoModelForSeq2SeqLM.from_pretrained("Wikidepia/indobart-base-IDN")
+tokenizer.save_pretrained("./abstractive_model_artifacts")
+model.save_pretrained("./abstractive_model_artifacts")
+            """, language="python")
             return None, None
 
 # Panggil fungsi untuk memuat kedua model saat aplikasi dimulai
@@ -324,16 +344,49 @@ word2vec_model = load_word2vec_model()
 indobart_tokenizer, indobart_model = load_indobart_model()
 
 
-# --- Tampilan Aplikasi Streamlit ---
-st.set_page_config(
-    page_title="Text Summarizer (Extractive & Abstractive)",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
+
 
 st.title("📝 Text Summarizer (Extractive & Abstractive)")
 st.markdown("Aplikasi ini memungkinkan Anda memilih antara peringkasan *extractive* (TextRank) dan *abstractive* (IndoBART).")
 st.markdown("---")
+
+# Bagian instruksi model di sidebar
+st.sidebar.header("📚 Panduan Penyiapan Model")
+st.sidebar.markdown("""
+Aplikasi ini membutuhkan dua model machine learning:
+1.  **Word2Vec** untuk peringkasan Extractive (TextRank).
+2.  **IndoBART** (Transformer) untuk peringkasan Abstractive.
+
+---
+**Bagaimana Cara Menyiapkannya?**
+
+**Untuk Model Word2Vec (`word2vec_model.bin`):**
+Model ini perlu dilatih pada korpus teks bahasa Indonesia yang besar. Jika Anda belum memilikinya, Anda perlu melatihnya atau mengunduh model pra-terlatih jika tersedia.
+* Pastikan file `word2vec_model.bin` berada di **direktori yang sama** dengan file aplikasi Streamlit ini.
+
+**Untuk Model IndoBART (`abstractive_model_artifacts`):**
+Anda perlu mengunduh model `Wikidepia/indobart-base-IDN` dari Hugging Face.
+* Buat folder bernama `abstractive_model_artifacts` di **direktori yang sama** dengan aplikasi ini.
+* Unduh semua file model (tokenizer dan model itu sendiri) ke dalam folder `abstractive_model_artifacts`.
+* **Cara Mengunduh menggunakan kode Python:**
+    ```python
+    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+    # Ganti "Wikidepia/indobart-base-IDN" jika Anda menggunakan model IndoBART lain
+    model_name = "Wikidepia/indobart-base-IDN" 
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+
+    # Simpan ke folder yang akan dibaca aplikasi Streamlit
+    tokenizer.save_pretrained("./abstractive_model_artifacts")
+    model.save_pretrained("./abstractive_model_artifacts")
+    print("Model IndoBART berhasil diunduh dan disimpan!")
+    ```
+Pastikan Anda menjalankan kode pengunduhan ini **sekali** di lingkungan Python Anda sebelum menjalankan aplikasi Streamlit.
+""")
+st.sidebar.markdown("---")
+
 
 # Pilihan sumber input
 input_source = st.radio(
@@ -432,7 +485,7 @@ if st.button("Ringkas Teks"):
 
         if summary_type == "Extractive (TextRank)":
             if word2vec_model is None:
-                st.error("Model Word2Vec tidak dapat dimuat. Proses peringkasan TextRank tidak dapat dilakukan.")
+                st.error("Model Word2Vec tidak dapat dimuat. Proses peringkasan TextRank tidak dapat dilakukan. Lihat sidebar untuk panduan penyiapan model.")
             else:
                 with st.spinner("Meringkas teks Anda dengan TextRank..."):
                     summary, status = textrank_summarize(
@@ -442,7 +495,7 @@ if st.button("Ringkas Teks"):
                     )
         elif summary_type == "Abstractive (IndoBART)":
             if indobart_tokenizer is None or indobart_model is None:
-                st.error("Model IndoBART tidak dapat dimuat. Proses peringkasan Abstractive tidak dapat dilakukan.")
+                st.error("Model IndoBART tidak dapat dimuat. Proses peringkasan Abstractive tidak dapat dilakukan. Lihat sidebar untuk panduan penyiapan model.")
             else:
                 with st.spinner("Meringkas teks Anda dengan IndoBART..."):
                     summary, status = indobart_summarize(
