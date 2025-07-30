@@ -1,10 +1,10 @@
-# streamlit
-# pandas
-# nltk
-# gensim
-# scikit-learn
-# networkx
-# numpy
+streamlit
+pandas
+nltk
+gensim
+scikit-learn
+networkx
+numpy
 beautifulsoup4  # Untuk pra-pemrosesan abstractive
 transformers    # Untuk model IndoBART
 torch           # Untuk backend PyTorch Transformers
