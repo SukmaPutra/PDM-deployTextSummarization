@@ -38,8 +38,12 @@ except nltk.downloader.DownloadError:
 print("Sumber daya NLTK siap.")
 
 # --- Path ke Model ---
-W2V_MODEL_PATH = "word2vec_model.bin"
-ABSTRACTIVE_MODEL_PATH = "./abstractive_model_artifacts" # Path baru untuk model abstractive
+# Asumsi Word2Vec masih lokal. Jika ini juga diunggah, perlu diubah.
+W2V_MODEL_PATH = "word2vec_model.bin" 
+
+# Ganti ini dengan ID repositori Hugging Face Anda
+# Ini adalah repositori yang baru saja Anda unggah ke Hugging Face Hub
+ABSTRACTIVE_MODEL_ID = "SukmaPutra/abstractive_model_artifacts" 
 
 # --- Fungsi untuk mengambil teks dari URL ---
 def get_text_from_url(url):
@@ -308,43 +312,27 @@ def load_word2vec_model(path=W2V_MODEL_PATH):
 
 # IndoBART untuk Abstractive
 @st.cache_resource
-def load_indobart_model(path=ABSTRACTIVE_MODEL_PATH):
-    with st.spinner("Memuat model IndoBART (Abstractive)..."):
-        if os.path.exists(path) and os.path.isdir(path) and os.path.exists(os.path.join(path, "config.json")): # Cek file config sebagai indikator kelengkapan
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(path)
-                model = AutoModelForSeq2SeqLM.from_pretrained(path)
-                model.eval() # Set model ke mode evaluasi
-                # --- MODIFIKASI DIMULAI DI SINI ---
-                # Buat placeholder untuk pesan
-                success_message_placeholder = st.empty()
-                success_message_placeholder.success("Model IndoBART berhasil dimuat!")
-                time.sleep(3) # Tunggu 3 detik
-                success_message_placeholder.empty() # Hapus pesan
-                return tokenizer, model
-            except Exception as e:
-                st.error(f"Gagal memuat model IndoBART: {e}. Pastikan artefak model ada di '{path}' dan tidak rusak.")
-                st.info("Anda perlu mengunduh dan menyimpan model IndoBART ke folder ini terlebih dahulu.")
-                return None, None
-        else:
-            st.error(f"Folder model IndoBART '{path}' tidak ditemukan atau tidak lengkap.")
-            st.info("Harap pastikan Anda telah mengunduh model **Wikidepia/indobart-base-IDN** dari Hugging Face dan menyimpan isinya ke dalam folder `abstractive_model_artifacts` di direktori yang sama dengan aplikasi ini.")
-            st.markdown("Untuk mengunduh, Anda bisa menggunakan kode berikut di lingkungan Python Anda:")
-            st.code("""
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-tokenizer = AutoTokenizer.from_pretrained("Wikidepia/indobart-base-IDN")
-model = AutoModelForSeq2SeqLM.from_pretrained("Wikidepia/indobart-base-IDN")
-tokenizer.save_pretrained("./abstractive_model_artifacts")
-model.save_pretrained("./abstractive_model_artifacts")
-            """, language="python")
+def load_indobart_model(model_id=ABSTRACTIVE_MODEL_ID): # Menggunakan model_id dari Hugging Face
+    with st.spinner(f"Mengunduh dan memuat model IndoBART ({model_id})... Ini mungkin memerlukan waktu beberapa saat."):
+        try:
+            # Langsung memuat dari Hugging Face Hub menggunakan model_id
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+            model.eval() # Set model ke mode evaluasi
+            
+            success_message_placeholder = st.empty()
+            success_message_placeholder.success("Model IndoBART berhasil dimuat!")
+            time.sleep(3) # Tunggu 3 detik
+            success_message_placeholder.empty() # Hapus pesan
+            return tokenizer, model
+        except Exception as e:
+            st.error(f"Gagal memuat model IndoBART dari Hugging Face Hub: {e}.")
+            st.info(f"Pastikan ID model '{model_id}' benar dan dapat diakses. Coba periksa koneksi internet Anda.")
             return None, None
 
 # Panggil fungsi untuk memuat kedua model saat aplikasi dimulai
 word2vec_model = load_word2vec_model()
-indobart_tokenizer, indobart_model = load_indobart_model()
-
-
-
+indobart_tokenizer, indobart_model = load_indobart_model() # Panggil tanpa argumen path
 
 st.title("📝 Text Summarizer (Extractive & Abstractive)")
 st.markdown("Aplikasi ini memungkinkan Anda memilih antara peringkasan *extractive* (TextRank) dan *abstractive* (IndoBART).")
@@ -364,26 +352,10 @@ Aplikasi ini membutuhkan dua model machine learning:
 Model ini perlu dilatih pada korpus teks bahasa Indonesia yang besar. Jika Anda belum memilikinya, Anda perlu melatihnya atau mengunduh model pra-terlatih jika tersedia.
 * Pastikan file `word2vec_model.bin` berada di **direktori yang sama** dengan file aplikasi Streamlit ini.
 
-**Untuk Model IndoBART (`abstractive_model_artifacts`):**
-Anda perlu mengunduh model `Wikidepia/indobart-base-IDN` dari Hugging Face.
-* Buat folder bernama `abstractive_model_artifacts` di **direktori yang sama** dengan aplikasi ini.
-* Unduh semua file model (tokenizer dan model itu sendiri) ke dalam folder `abstractive_model_artifacts`.
-* **Cara Mengunduh menggunakan kode Python:**
-    ```python
-    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-
-    # Ganti "Wikidepia/indobart-base-IDN" jika Anda menggunakan model IndoBART lain
-    model_name = "Wikidepia/indobart-base-IDN" 
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-
-    # Simpan ke folder yang akan dibaca aplikasi Streamlit
-    tokenizer.save_pretrained("./abstractive_model_artifacts")
-    model.save_pretrained("./abstractive_model_artifacts")
-    print("Model IndoBART berhasil diunduh dan disimpan!")
-    ```
-Pastikan Anda menjalankan kode pengunduhan ini **sekali** di lingkungan Python Anda sebelum menjalankan aplikasi Streamlit.
+**Untuk Model IndoBART (Abstractive):**
+Model ini akan diunduh secara otomatis dari Hugging Face Hub saat aplikasi pertama kali dijalankan.
+* **ID Model:** `SukmaPutra/abstractive_model_artifacts`
+* Pastikan aplikasi Streamlit Anda memiliki akses internet untuk mengunduh model ini.
 """)
 st.sidebar.markdown("---")
 
