@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 import requests
 from urllib.parse import urlparse
 import time
+from huggingface_hub import hf_hub_download
 
 # --- Tampilan Aplikasi Streamlit ---
 st.set_page_config(
@@ -23,26 +24,32 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-print("--- Memulai Aplikasi Streamlit ---")
+# st.write("--- Memulai Aplikasi Streamlit ---")
 
 # --- Pastikan NLTK resources terunduh ---
-print("Memeriksa dan mengunduh sumber daya NLTK (punkt, stopwords)...")
-try:
-    nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
-    nltk.download('punkt')
-try:
-    nltk.data.find('corpora/stopwords')
-except nltk.downloader.DownloadError:
-    nltk.download('stopwords')
-print("Sumber daya NLTK siap.")
+# Fungsi untuk mengunduh NLTK resources dengan st.cache_resource
+@st.cache_resource
+def download_nltk_resources():
+    st.info("Memeriksa dan mengunduh sumber daya NLTK (punkt, stopwords)...")
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except nltk.downloader.DownloadError:
+        nltk.download('punkt')
+    try:
+        nltk.data.find('corpora/stopwords')
+    except nltk.downloader.DownloadError:
+        nltk.download('stopwords')
+    st.success("Sumber daya NLTK siap.")
 
-# --- Path ke Model ---
-# Asumsi Word2Vec masih lokal. Jika ini juga diunggah, perlu diubah.
-W2V_MODEL_PATH = "word2vec_model.bin" 
+download_nltk_resources()
 
-# Ganti ini dengan ID repositori Hugging Face Anda
-# Ini adalah repositori yang baru saja Anda unggah ke Hugging Face Hub
+
+# --- ID Repositori Hugging Face ---
+# ID repositori untuk model Word2Vec
+W2V_REPO_ID = "SukmaPutra/word2vec_model" # Pastikan ini adalah ID repositori Anda
+W2V_FILENAME = "word2vec_model.bin"
+
+# ID repositori untuk model IndoBART
 ABSTRACTIVE_MODEL_ID = "SukmaPutra/abstractive_model_artifacts" 
 
 # --- Fungsi untuk mengambil teks dari URL ---
@@ -52,17 +59,14 @@ def get_text_from_url(url):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()  # Akan memunculkan HTTPError untuk status kode 4xx/5xx
+        response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # Hapus skrip dan style agar tidak mengganggu ekstraksi teks
         for script_or_style in soup(['script', 'style']):
             script_or_style.extract()
 
         article_text = ""
-        
-        # Opsi 1: Coba cari tag semantik atau class/id umum yang mengandung konten artikel
         possible_content_tags = [
             {'name': 'article'},
             {'name': 'main'},
@@ -77,18 +81,15 @@ def get_text_from_url(url):
             found = soup.find(tag_name, **tag_attrs)
             if found:
                 article_text = found.get_text(separator=' ', strip=True)
-                # Pastikan teks yang didapat cukup panjang dan relevan
-                if len(article_text.split()) > 50: # Minimal 50 kata sebagai indikasi konten
+                if len(article_text.split()) > 50:
                     break
-                else: # Jika terlalu pendek, coba cari yang lain
+                else:
                     article_text = ""
         
-        # Opsi 2: Jika tidak ditemukan konten spesifik, ambil semua teks dari tag paragraf
         if not article_text or len(article_text.split()) < 50:
             paragraphs = soup.find_all('p')
             article_text = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
 
-        # Opsi 3: Jika masih kosong atau sangat pendek, ambil semua teks dari body
         if not article_text or len(article_text.split()) < 50:
             if soup.body:
                 article_text = soup.body.get_text(separator=' ', strip=True)
@@ -96,13 +97,8 @@ def get_text_from_url(url):
                 st.warning("Tidak dapat menemukan tag <body> di halaman.")
                 return None
 
-        # Lakukan pembersihan tambahan pada teks yang diambil
-        # Ganti spasi berlebih, tab, dan newline dengan satu spasi
         article_text = re.sub(r'\s+', ' ', article_text).strip()
-        # Hapus karakter non-ASCII yang tidak diinginkan (opsional, tergantung kebutuhan)
-        # article_text = re.sub(r'[^\x00-\x7F]+', ' ', article_text) 
         
-        # Filter kalimat yang terlalu pendek atau berisi boilerplate
         sentences = sent_tokenize(article_text)
         filtered_sentences = [
             s for s in sentences 
@@ -123,7 +119,6 @@ def get_text_from_url(url):
 def is_valid_url(url):
     try:
         result = urlparse(url)
-        # Pastikan ada skema (http/https) dan lokasi jaringan (domain)
         return all([result.scheme, result.netloc])
     except ValueError:
         return False
@@ -137,12 +132,10 @@ def preprocess_single_article_extractive(article_content):
     sentences_from_content = sent_tokenize(article_content)
 
     for sentence in sentences_from_content:
-        # Hapus placeholder seperti [baca:...] atau advertisement
         cleaned_sent_for_analysis = re.sub(r'\[baca:\s*[^\]]*\]', '', sentence, flags=re.IGNORECASE)
         cleaned_sent_for_analysis = re.sub(r'advertisement', '', cleaned_sent_for_analysis, flags=re.IGNORECASE)
 
         words = [word.lower() for word in word_tokenize(cleaned_sent_for_analysis)]
-        # Filter kata yang hanya berisi huruf dan bukan stop words
         filtered_words = [word for word in words if word.isalpha() and word not in stop_words]
 
         if filtered_words:
@@ -153,8 +146,6 @@ def preprocess_single_article_extractive(article_content):
 # --- Fungsi untuk mendapatkan vektor kalimat (Extractive) ---
 def get_sentence_vector(sentence_tokens, word2vec_model):
     if word2vec_model is None:
-        # Mengembalikan array nol jika model tidak dimuat, sesuaikan dimensi jika perlu
-        # Asumsi ukuran vektor 100, bisa disesuaikan jika model Word2Vec Anda berbeda
         return np.zeros(100) 
     
     vectors = []
@@ -164,16 +155,11 @@ def get_sentence_vector(sentence_tokens, word2vec_model):
 
     if vectors:
         return np.mean(vectors, axis=0)
-    # Penting: Mengembalikan vektor nol dengan ukuran yang benar jika tidak ada kata yang valid
     return np.zeros(word2vec_model.vector_size)
-
 
 # --- Fungsi TextRank untuk Peringkasan (Extractive) ---
 def textrank_summarize(article_content, word2vec_model, target_word_count):
-    # Dapatkan semua kalimat asli untuk fallback dan pemesanan akhir
     all_original_sentences_in_order = sent_tokenize(article_content)
-    
-    # Fallback summary jika terjadi kegagalan atau teks terlalu pendek
     fallback_summary = " ".join(all_original_sentences_in_order[:min(len(all_original_sentences_in_order), 2)])
 
     cleaned_sentences_tokenized, original_relevant_sentences = preprocess_single_article_extractive(article_content)
@@ -186,66 +172,52 @@ def textrank_summarize(article_content, word2vec_model, target_word_count):
 
     for i, tokens in enumerate(cleaned_sentences_tokenized):
         vec = get_sentence_vector(tokens, word2vec_model)
-        # Pastikan vektor tidak nol dan memiliki dimensi yang benar
         if vec is not None and not np.all(vec == 0) and vec.shape[0] == word2vec_model.vector_size: 
             sentence_vectors.append(vec)
-            valid_original_indices.append(i) # Indeks di dalam original_relevant_sentences
+            valid_original_indices.append(i)
 
     if len(sentence_vectors) < 2:
         return fallback_summary, "Gagal (Vektor Kalimat Kurang)"
 
     try:
-        # Menghitung matriks kemiripan kosinus antar vektor kalimat
         similarity_matrix = cosine_similarity(sentence_vectors)
     except ValueError as e:
         return fallback_summary, f"Gagal (Masalah Dimensi Vektor: {e})"
 
-    # Membuat graph dari matriks kemiripan dan menjalankan PageRank
     graph = nx.from_numpy_array(similarity_matrix)
     scores = {}
     try:
-        # PageRank untuk menentukan skor pentingnya setiap kalimat
         scores = nx.pagerank(graph, max_iter=1000, tol=1e-3)
     except nx.PowerIterationFailedConvergence:
         st.warning("Peringatan: PageRank gagal konvergen untuk teks ini. Menggunakan fallback.")
         return fallback_summary, "Gagal (PageRank Konvergensi)"
 
-    # Urutkan kalimat berdasarkan skor PageRank dari yang tertinggi
     ranked_processed_indices = sorted(((scores[i], idx_in_valid) for idx_in_valid, i in enumerate(scores)), reverse=True)
 
     current_word_count = 0
-    final_summary_pairs = [] # Untuk menyimpan (indeks_asli, kalimat_asli)
+    final_summary_pairs = []
     num_selected_sentences = 0
 
-    # Ambil kalimat hingga mencapai target_word_count atau proporsi tertentu
     for score, processed_idx_in_valid in ranked_processed_indices:
-        # Dapatkan indeks kalimat asli dari `original_relevant_sentences`
         original_idx_in_relevant = valid_original_indices[processed_idx_in_valid]
         original_sentence = original_relevant_sentences[original_idx_in_relevant]
 
-        # Temukan posisi kalimat asli di keseluruhan artikel untuk menjaga urutan
         try:
             actual_original_idx = all_original_sentences_in_order.index(original_sentence)
 
-            # Hindari duplikasi kalimat (meskipun jarang dengan TextRank)
             if original_sentence not in [s for _, s in final_summary_pairs]:
                 final_summary_pairs.append((actual_original_idx, original_sentence))
                 current_word_count += len(word_tokenize(original_sentence))
                 num_selected_sentences += 1
         except ValueError:
-            # Kalimat mungkin telah dimodifikasi atau tidak ditemukan, lewati saja
             pass
 
-        # Hentikan jika sudah mencapai target kata atau cukup banyak kalimat
-        # Pilih sekitar 20-50% dari kalimat asli untuk ringkasan
         if current_word_count >= target_word_count or num_selected_sentences >= len(original_relevant_sentences) * 0.3 + 1:
             break
             
-    # Jika tidak ada kalimat yang terpilih, gunakan fallback
     if not final_summary_pairs and len(all_original_sentences_in_order) > 0:
         return fallback_summary, "Gagal (Ringkasan Kosong/Terlalu Pendek)"
 
-    # Urutkan kalimat yang terpilih berdasarkan kemunculannya di teks asli
     final_summary_sentences_ordered = [sent for idx, sent in sorted(final_summary_pairs)]
 
     return " ".join(final_summary_sentences_ordered), "Sukses"
@@ -271,59 +243,56 @@ def indobart_summarize(text, tokenizer, model, min_len=30, max_len=150):
             input_ids,
             min_length=min_len,
             max_length=max_len,
-            num_beams=4,              # Meningkatkan num_beams untuk kualitas yang lebih baik
-            repetition_penalty=2.0,   
-            length_penalty=1.0,       # Sesuaikan length_penalty
-            early_stopping=True,      
-            no_repeat_ngram_size=3,   # Mencegah pengulangan n-gram berukuran 3
-            use_cache=True,           
-            do_sample=True,           
-            temperature=0.8,          # Sesuaikan temperature untuk sedikit variasi tapi tetap koheren
-            top_k=50,                 
-            top_p=0.95                
+            num_beams=4,
+            repetition_penalty=2.0,
+            length_penalty=1.0,
+            early_stopping=True,
+            no_repeat_ngram_size=3,
+            use_cache=True,
+            do_sample=True,
+            temperature=0.8,
+            top_k=50,
+            top_p=0.95
         )
         summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
     return summary, "Sukses"
 
 
 # --- Pemuatan Model (dengan st.cache_resource) ---
-# Word2Vec untuk TextRank
+# Word2Vec untuk TextRank, diunduh dari Hugging Face Hub
 @st.cache_resource
-def load_word2vec_model(path=W2V_MODEL_PATH):
-    with st.spinner("Memuat model Word2Vec (Extractive)..."):
-        if os.path.exists(path):
-            try:
-                model = Word2Vec.load(path)
-                # --- MODIFIKASI DIMULAI DI SINI ---
-                # Buat placeholder untuk pesan
-                success_message_placeholder = st.empty()
-                success_message_placeholder.success("Model Word2Vec berhasil dimuat!")
-                time.sleep(3) # Tunggu 3 detik
-                success_message_placeholder.empty() # Hapus pesan
-                return model
-            except Exception as e:
-                st.error(f"Gagal memuat model Word2Vec: {e}. Pastikan file '{path}' ada dan tidak rusak.")
-                st.info("Anda mungkin perlu melatih dan menyimpan model Word2Vec terlebih dahulu dari korpus teks bahasa Indonesia.")
-                return None
-        else:
-            st.error(f"File model Word2Vec '{path}' tidak ditemukan.")
-            st.info("Harap pastikan Anda telah menempatkan file ini di folder yang sama dengan aplikasi Streamlit Anda. Jika belum punya, Anda perlu melatihnya atau mengunduh model pra-terlatih.")
+def load_word2vec_model(repo_id=W2V_REPO_ID, filename=W2V_FILENAME):
+    with st.spinner("Mengunduh dan memuat model Word2Vec (Extractive)..."):
+        try:
+            # Mengunduh file dari Hugging Face Hub ke direktori lokal
+            local_path = hf_hub_download(repo_id=repo_id, filename=filename, local_dir=".")
+            
+            # Memuat model Word2Vec dari file yang sudah diunduh
+            model = Word2Vec.load(local_path)
+            
+            # success_message_placeholder = st.empty()
+            # success_message_placeholder.success("Model Word2Vec berhasil dimuat!")
+            # time.sleep(3) # Tunggu 3 detik
+            # success_message_placeholder.empty() # Hapus pesan
+            return model
+        except Exception as e:
+            st.error(f"Gagal memuat model Word2Vec dari Hugging Face Hub: {e}.")
+            st.info(f"Pastikan ID repositori '{repo_id}' dan nama file '{filename}' sudah benar, dan repositori tersebut bersifat publik.")
             return None
 
-# IndoBART untuk Abstractive
+# IndoBART untuk Abstractive, diunduh dari Hugging Face Hub
 @st.cache_resource
-def load_indobart_model(model_id=ABSTRACTIVE_MODEL_ID): # Menggunakan model_id dari Hugging Face
+def load_indobart_model(model_id=ABSTRACTIVE_MODEL_ID):
     with st.spinner(f"Mengunduh dan memuat model IndoBART ({model_id})... Ini mungkin memerlukan waktu beberapa saat."):
         try:
-            # Langsung memuat dari Hugging Face Hub menggunakan model_id
             tokenizer = AutoTokenizer.from_pretrained(model_id)
             model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
-            model.eval() # Set model ke mode evaluasi
+            model.eval()
             
-            success_message_placeholder = st.empty()
-            success_message_placeholder.success("Model IndoBART berhasil dimuat!")
-            time.sleep(3) # Tunggu 3 detik
-            success_message_placeholder.empty() # Hapus pesan
+            # success_message_placeholder = st.empty()
+            # success_message_placeholder.success("Model IndoBART berhasil dimuat!")
+            # time.sleep(3)
+            # success_message_placeholder.empty()
             return tokenizer, model
         except Exception as e:
             st.error(f"Gagal memuat model IndoBART dari Hugging Face Hub: {e}.")
@@ -332,8 +301,9 @@ def load_indobart_model(model_id=ABSTRACTIVE_MODEL_ID): # Menggunakan model_id d
 
 # Panggil fungsi untuk memuat kedua model saat aplikasi dimulai
 word2vec_model = load_word2vec_model()
-indobart_tokenizer, indobart_model = load_indobart_model() # Panggil tanpa argumen path
+indobart_tokenizer, indobart_model = load_indobart_model()
 
+# --- BAGIAN UI APLIKASI ---
 st.title("📝 Text Summarizer (Extractive & Abstractive)")
 st.markdown("Aplikasi ini memungkinkan Anda memilih antara peringkasan *extractive* (TextRank) dan *abstractive* (IndoBART).")
 st.markdown("---")
@@ -347,15 +317,16 @@ Aplikasi ini membutuhkan dua model machine learning:
 
 ---
 **Bagaimana Cara Menyiapkannya?**
+Model akan diunduh secara otomatis dari Hugging Face Hub saat aplikasi pertama kali dijalankan.
 
-**Untuk Model Word2Vec (`word2vec_model.bin`):**
-Model ini perlu dilatih pada korpus teks bahasa Indonesia yang besar. Jika Anda belum memilikinya, Anda perlu melatihnya atau mengunduh model pra-terlatih jika tersedia.
-* Pastikan file `word2vec_model.bin` berada di **direktori yang sama** dengan file aplikasi Streamlit ini.
+**Untuk Model Word2Vec:**
+* **ID Repositori:** `SukmaPutra/word2vec_model`
+* **Nama File:** `word2vec_model.bin`
 
-**Untuk Model IndoBART (Abstractive):**
-Model ini akan diunduh secara otomatis dari Hugging Face Hub saat aplikasi pertama kali dijalankan.
+**Untuk Model IndoBART:**
 * **ID Model:** `SukmaPutra/abstractive_model_artifacts`
-* Pastikan aplikasi Streamlit Anda memiliki akses internet untuk mengunduh model ini.
+
+Pastikan kedua repositori tersebut bersifat publik dan dapat diakses.
 """)
 st.sidebar.markdown("---")
 
@@ -390,16 +361,13 @@ else: # input_source == "Dari URL Artikel"
                 extracted_text = get_text_from_url(article_url)
                 if extracted_text:
                     st.success("Teks dari URL berhasil diambil!")
-                    user_input_text = extracted_text # Set user_input_text dengan teks dari URL
-                    
-                    # Tampilkan sebagian teks yang diambil di expander
+                    user_input_text = extracted_text
                     preview_text = extracted_text[:1000] + "..." if len(extracted_text) > 1000 else extracted_text
                     st.expander("Lihat Pratinjau Teks yang Diambil").write(preview_text)
                 else:
                     st.error("Gagal mengambil teks dari URL. Pastikan URL mengarah ke artikel yang dapat diproses dan tidak ada masalah jaringan.")
-                    user_input_text = "" # Pastikan input kosong jika pengambilan gagal
+                    user_input_text = ""
 
-# Pilihan model peringkasan
 summary_type = st.radio(
     "Pilih Jenis Peringkasan:",
     ("Extractive (TextRank)", "Abstractive (IndoBART)"),
@@ -408,7 +376,6 @@ summary_type = st.radio(
 
 summary_length_options = {}
 
-# Slider untuk mengatur panjang ringkasan berdasarkan jenis model
 if summary_type == "Extractive (TextRank)":
     target_word_count_slider = st.slider(
         "Panjang Ringkasan Target (Jumlah Kata untuk TextRank)",
@@ -443,13 +410,11 @@ elif summary_type == "Abstractive (IndoBART)":
     summary_length_options['abstractive_max_length'] = abs_max_length
 
 
-# Tombol untuk memulai proses ringkasan
 if st.button("Ringkas Teks"):
-    # Cek apakah ada teks yang valid untuk diringkas
     if not user_input_text.strip():
         if input_source == "Masukkan Teks Manual":
             st.warning("Mohon masukkan teks terlebih dahulu untuk diringkas.")
-        else: # Dari URL Artikel
+        else:
             st.warning("Mohon masukkan URL artikel yang valid dan pastikan teks berhasil diambil. Coba URL lain jika masih gagal.")
     else:
         summary = ""
@@ -484,7 +449,7 @@ if st.button("Ringkas Teks"):
             st.info(f"Jenis Ringkasan: **{summary_type}** | Total Kata Ringkasan: **{len(word_tokenize(summary))}** | Status: **{status}**")
         else:
             st.error(f"Gagal membuat ringkasan. Status: {status}")
-            st.write(summary) # Menampilkan fallback jika ada
+            st.write(summary)
 
 st.markdown("---")
 st.markdown("Dibuat dengan ❤️ oleh Sukma Apri Ananda Putra - UAS PDM 2025")
